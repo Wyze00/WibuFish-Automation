@@ -1,6 +1,7 @@
 # OVERVIEW
 
 Skrip otomatisasi mancing di WibuFish
+- Note : optimal untuk layar 1080x2460 pixel, sisanya harus ada yang diubah sendiri
 - Ikan rarity epic ke bawah bisa otomatis
 - Ikan rarity legend ke atas semi-otomatis (sampe strike otomatis, mancingnya manual) 
 
