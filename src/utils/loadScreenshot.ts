@@ -25,18 +25,31 @@ const SEARCH_REGION = {
     height: 480
 };
 
+interface CapturedFrame {
+    data: Buffer;
+    version: number;
+    receivedAt: number;
+}
+
 class PersistentScreenshot {
     private process: ChildProcessWithoutNullStreams;
     private buffer = Buffer.alloc(0);
+
     private latestFrame?: Buffer;
     private frameVersion = 0;
+
+    private latestFrameAt = 0;
+    private previousFrameAt = 0;
+
+    private lastDeliveredVersion = 0;
+    private frameWaiters = new Set<() => void>();
 
     constructor() {
         this.process = spawn("adb", [
             "exec-out",
             "sh",
             "-c",
-            "while true; do screencap -p; sleep 0.075; done"
+            "while true; do screencap -p; done"
         ]);
 
         this.process.stdout.on("data", (chunk: Buffer) => {
@@ -49,11 +62,11 @@ class PersistentScreenshot {
         });
 
         this.process.stderr.on("data", (data) => {
-            console.error("ADB:", data.toString());
+            logger.error("ADB:", data.toString());
         });
 
         this.process.on("error", (error) => {
-            console.error("ADB process error:", error);
+            logger.error("ADB process error:", error);
         });
     }
 
@@ -64,27 +77,74 @@ class PersistentScreenshot {
             if (end === -1) break;
 
             const frameEnd = end + PNG_END.length;
+            const now = performance.now();
+
+            if (this.previousFrameAt !== 0) {
+                logger.debug(`Capture : ${(now - this.previousFrameAt).toFixed(2)} ms`);
+            }
+
+            this.previousFrameAt = now;
 
             this.latestFrame = Buffer.from(
                 this.buffer.subarray(0, frameEnd)
             );
 
             this.frameVersion++;
+            this.latestFrameAt = now;
 
             this.buffer = this.buffer.subarray(frameEnd);
+
+            // Beritahu fungsi yang sedang menunggu frame baru
+            for (const notify of this.frameWaiters) {
+                notify();
+            }
         }
     }
 
-    getFrame(): {
-        data: Buffer;
-        version: number;
-    } | null {
+    private getLatestFrame(): CapturedFrame | null {
         if (!this.latestFrame) return null;
 
         return {
             data: this.latestFrame,
-            version: this.frameVersion
+            version: this.frameVersion,
+            receivedAt: this.latestFrameAt
         };
+    }
+
+    async waitForNextFrame(): Promise<CapturedFrame> {
+        const current = this.getLatestFrame();
+
+        // Jika sudah tersedia frame baru, langsung gunakan
+        if (
+            current &&
+            current.version > this.lastDeliveredVersion
+        ) {
+            this.lastDeliveredVersion = current.version;
+            return current;
+        }
+
+        // Jika belum ada frame baru, tunggu
+        return new Promise((resolve) => {
+            const notify = () => {
+                const frame = this.getLatestFrame();
+
+                if (
+                    !frame ||
+                    frame.version <= this.lastDeliveredVersion
+                ) {
+                    return;
+                }
+
+                this.lastDeliveredVersion = frame.version;
+
+                this.frameWaiters.delete(notify);
+
+                resolve(frame);
+            };
+
+            this.frameWaiters.add(notify);
+            notify();
+        });
     }
 
     close(): void {
@@ -95,27 +155,20 @@ class PersistentScreenshot {
 const capture = new PersistentScreenshot();
 
 export async function loadScreenshot(): Promise<cvModule.Mat> {
-    const frame = capture.getFrame();
+    const frame = await capture.waitForNextFrame();
 
-    if (frame) {
-        
-        const { data, info } = await sharp(frame.data)
-            .extract(SEARCH_REGION)
-            .removeAlpha()
-            .raw()
-            .toBuffer({ resolveWithObject: true });
+    const { data, info } = await sharp(frame.data)
+        .extract(SEARCH_REGION)
+        .removeAlpha()
+        .raw()
+        .toBuffer({ resolveWithObject: true });
 
-        const mat = new cv.Mat(
-            info.height,
-            info.width,
-            cv.CV_8UC3
-        );
+    const mat = new cv.Mat(
+        info.height,
+        info.width,
+        cv.CV_8UC3
+    );
 
-        mat.data.set(data);
-        return mat;
-
-    } else {
-        logger.error("Gagal screenhshot");
-        process.exit(1);
-    }
+    mat.data.set(data);
+    return mat;
 }
